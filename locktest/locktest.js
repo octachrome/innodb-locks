@@ -37,7 +37,7 @@
 
     var statements = [
         'DELETE FROM test',
-        'DELETE FROM test WHERE a < 5',
+        'DELETE FROM test WHERE a < 3',
         'DELETE FROM test WHERE a = 2'
     ];
 
@@ -57,13 +57,13 @@
 
         var promise = Q();
 
-        for (var i = 0; i < statements.length; i++) {
-            var statement = statements[i];
-
-            promise = promise.then(function runOneTest() {
-                return runTest(con1, con2, statement, statement, delay);
-            }).then(logStatus);
-        }
+        statements.forEach(function buildPromiseForTest(statement) {
+            promise = promise
+                .then(function runOneTest() {
+                    return runTest(con1, con2, statement, statement, delay);
+                })
+                .then(logStatus.bind(null, statement));
+        });
 
         promise.done(function tearDown() {
             disableLockMonitor(con1);
@@ -74,13 +74,14 @@
 
     /**
      * Print out the locks from the given InnoDB status string.
-     * @param status the output from 'SHOW ENGINE INNODB STATUS'
+     * @param statement the SQL statement which was just tested
+     * @param status    the output from 'SHOW ENGINE INNODB STATUS'
      */
-    function logStatus(status) {
-        var matches = status.match(/^.*lock.*$/mg);
-        for (var i = 0; i < matches.length; i++) {
-            console.log(matches[i]);
-        }
+    function logStatus(statement, status) {
+        console.log("--------------------");
+        console.log(statement);
+        console.log("--------------------\n");
+        console.log(findHeldLocks(status));
     }
 
     /**
@@ -201,5 +202,31 @@
      */
     function disableLockMonitor(con) {
         con.query('DROP TABLE IF EXISTS innodb_lock_monitor')
+    }
+
+    /**
+     * Extract the locks section from an InnoDB status string. If more than one transaction has active locks, only
+     * the locks from the first transaction will be returned.
+     * @param the output of 'SHOW ENGINE INNODB STATUS'
+     * @return a description of the locks held by the first active (non-waiting) transaction
+     */
+    function findHeldLocks(status) {
+        var transactions = status.split(/---TRANSACTION /).slice(1);
+        for (var i = 0; i < transactions.length; i++) {
+            var tx = transactions[i];
+
+            // Truncate the junk after the last transaction
+            var pos = tx.search('FILE I/O');
+            if (pos >= 0) tx = tx.slice(0, pos-10);
+
+            // Skip the transaction which is waiting for the lock
+            if (tx.search(/------------------/) >= 0) continue;
+
+            // Extract the text from the first lock description
+            var pos = tx.search(/(TABLE|RECORD) LOCK/);
+            if (pos > 0) {
+                return tx.slice(pos);
+            }
+        }
     }
 }());
