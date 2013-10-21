@@ -1,135 +1,205 @@
-/*
-    Open two connections, both with autocommit = 0
-    In parallel:
+(function() {
+    /*
+        Open two connections, both with autocommit = 0, then run the following in parallel:
 
-    Connection 1:                                       Connection 2:
-    Run a statment which acquires a lock
-                                                        Run a statement which blocks on the lock
-    Run 'SHOW ENGINE INNODB STATUS'
-    Rollback
-                                                        Rollback
+        Connection 1:                                       Connection 2:
+        Run a statment which acquires a lock
+                                                            Run a statement which blocks on the lock
+        Run 'SHOW ENGINE INNODB STATUS'
+        Rollback
+                                                            (unblocks when connection 1 rolls back)
+                                                            Rollback
 
-    con1.acquire
-     \
-      con2.block
-                \
-                 rollback
-      sleep
-       \
-        con1.status
+        This is implemented as series of chained promises:
+
+        con1.query
          \
-          rollback
-*/
+          con2.query
+          .         \
+          .          rollback
+          .
+          sleep until con2 is probably blocked
+           \
+            con1.status
+             \
+              rollback
+    */
 
-'use strict';
+    'use strict';
 
-var Q = require('q');
-var mysql = require('mysql');
+    var Q = require('q');
+    var mysql = require('mysql');
 
-Q.longStackSupport = true;
+    Q.longStackSupport = true;
 
-var ROLLBACK = 'ROLLBACK';
-var STATUS = 'SHOW ENGINE INNODB STATUS';
+    var ROLLBACK = 'ROLLBACK';
+    var STATUS = 'SHOW ENGINE INNODB STATUS';
 
-var statements = [
-    'DELETE FROM test',
-    'DELETE FROM test WHERE a < 5',
-    'DELETE FROM test WHERE a = 2'
-];
+    var statements = [
+        'DELETE FROM test',
+        'DELETE FROM test WHERE a < 5',
+        'DELETE FROM test WHERE a = 2'
+    ];
 
-runTests(statements, 50);
+    runTests(statements, 50/*ms*/);
 
 
-function runTests(statements, delay) {
-    var con1 = connect();
-    var con2 = connect();
+    /**
+     * Run each of the given statements on two concurrent MySQL connections and observe the locks which are aquired.
+     * @param statements    an array of SQL statements
+     * @param delay         how long to wait (in ms) for con2 to block before running 'SHOW ENGINE INNODB STATUS'
+     */
+    function runTests(statements, delay) {
+        var con1 = connect();
+        var con2 = connect();
 
-    enableLockMonitor(con1);
+        enableLockMonitor(con1);
 
-    var promise = Q();
+        var promise = Q();
 
-    for (var i = 0; i < statements.length; i++) {
-        var statement = statements[i];
+        for (var i = 0; i < statements.length; i++) {
+            var statement = statements[i];
 
-        promise = promise.then(function runOneTest() {
-            return runTest(con1, con2, statement, statement, delay);
-        }).then(logStatus);
-    }
+            promise = promise.then(function runOneTest() {
+                return runTest(con1, con2, statement, statement, delay);
+            }).then(logStatus);
+        }
 
-    promise.done(function tearDown() {
-        disableLockMonitor(con1);
-        con1.end();
-        con2.end();
-    });
-}
-
-function logStatus(status) {
-    var matches = status.match(/^.*lock.*$/mg);
-    for (var i = 0; i < matches.length; i++) {
-        console.log(matches[i]);
-    }
-}
-
-// Returns a function which executes the given SQL statement and returns a promise of the result.
-// The function expects to be passed the result of a previous promise (which it ignores) and a callback to invoke when the SQL has been executed.
-function bindQuery(con, sql) {
-    // Ignore the result from the previous chained promise
-    return Q.nbind(function(ignoredResult, cb) {
-        con.query(sql, cb);
-    });
-}
-
-// Given a function, fn, which returns a promise, return a function which calls fn but ignores its result.
-// The function instead chains the previous promise.
-function ignore(fn, thisArg) {
-    return function(outerResult) {
-        var deferred = Q.defer();
-        fn.call(thisArg, outerResult)
-            .done(function onFulfilled(ignoredResult) {
-                deferred.resolve(outerResult);
-            }, function onRejected(error) {
-                deferred.reject(error);
-            });
-        return deferred.promise;
-    }
-}
-
-function runTest(con1, con2, sql1, sql2, delay) {
-    return bindQuery(con1, sql1)(null)
-        .then(function doAll() {
-            return Q.all([
-                bindQuery(con2, sql2)(null)
-                    .then(bindQuery(con2, ROLLBACK)),
-
-                Q.delay(delay)
-                    .then(bindQuery(con1, STATUS))
-                    .then(ignore(bindQuery(con1, ROLLBACK)))
-            ]);
-        })
-        .spread(function extractStatus(result1, result2) {
-            return Q(result2[0][0].Status);
+        promise.done(function tearDown() {
+            disableLockMonitor(con1);
+            con1.end();
+            con2.end();
         });
-}
+    }
 
-function connect() {
-    var conDetails = {
-        host: 'localhost',
-        user: 'root',
-        password: '',
-        database: 'test'
-    };
+    /**
+     * Print out the locks from the given InnoDB status string.
+     * @param status the output from 'SHOW ENGINE INNODB STATUS'
+     */
+    function logStatus(status) {
+        var matches = status.match(/^.*lock.*$/mg);
+        for (var i = 0; i < matches.length; i++) {
+            console.log(matches[i]);
+        }
+    }
 
-    var con = mysql.createConnection(conDetails);
-    con.connect();
-    con.query('set autocommit = 0');
-    return con;
-}
+    /**
+     * Creates a function which executes the given SQL statement and gives a promise of the resulting rowset. The
+     * function expects to be passed the result of a previous promise (which it ignores) and a callback to invoke
+     * when the SQL has been executed.
+     * @param con the MySQL connection on which to execute the SQL statement
+     * @param sql the SQL statement to execute
+     * @return a function which executes the SQL statement and gives a promise of the result
+     */
+    function bindQuery(con, sql) {
+        // Ignore the result from the previous chained promise
+        return Q.nbind(function(ignoredResult, cb) {
+            con.query(sql, cb);
+        });
+    }
 
-function enableLockMonitor(con) {
-    con.query('DROP TABLE IF EXISTS innodb_lock_monitor')
-    con.query('CREATE TABLE innodb_lock_monitor (a INT)')
-}
+    /**
+     * A function decorator, which given a unary function returning a promise, create another function which calls
+     * fn and then returns a promise which resolves to the function's argument (instead of the promise returned by
+     * fn). This is useful when building chains of promise-returning functions where you want to skip a link in the
+     * chain, passing the result of an earlier function to a function further along the chain. E.g.:
+     * 
+     *     doA()
+     *         .then(function(resultA) {
+     *             return doB(resultA);
+     *         }).then(function(resultB) {
+     *             return doC(resultB);
+     *         }).then(function(resultC) {
+     *             ...
+     *         });
+     *
+     * Becomes:
+     *
+     *     doA()
+     *         .then(ignore(function(resultA) {
+     *             return doB(resultA);
+     *         })).then(function(resultA) {
+     *             // we have the result of A (i.e., B was skipped)
+     *             return doC(resultA);
+     *         }).then(function(resultC) {
+     *             ...
+     *         });
+     *
+     * @param fn        a unary function returning a promise
+     * @param thisArg   (optional) the context in which fn should be called
+     * @return a function which calls fn and returns a promise which resolves to the function's argument
+     */
+    function ignore(fn, thisArg) {
+        return function(outerResult) {
+            var deferred = Q.defer();
+            fn.call(thisArg, outerResult)
+                .done(function onFulfilled(ignoredResult) {
+                    deferred.resolve(outerResult);
+                }, function onRejected(error) {
+                    deferred.reject(error);
+                });
+            return deferred.promise;
+        }
+    }
 
-function disableLockMonitor(con) {
-    con.query('DROP TABLE IF EXISTS innodb_lock_monitor')
-}
+    /**
+     * Run a single test, by executing sql1 on con1 in parallel with executing sql2 on con2. See the diagram at top of
+     * this file.
+     * @param con1  the connection with which to acquire the first lock
+     * @param con2  the connection with which to attempt to acquire the second lock
+     * @param sql1  the SQL statement used to acquire the first lock
+     * @param sql2  the SQL statement used to attempt to acquire the second lock
+     * @param delay how long to wait (in ms) for con2 to block before running 'SHOW ENGINE INNODB STATUS'
+     * @return a promise resolving to the result of 'SHOW ENGINE INNODB STATUS' on con1 while con2 was blocked on a lock
+     */
+    function runTest(con1, con2, sql1, sql2, delay) {
+        return bindQuery(con1, sql1)(null)
+            .then(function doAll() {
+                return Q.all([
+                    bindQuery(con2, sql2)(null)
+                        .then(bindQuery(con2, ROLLBACK)),
+
+                    Q.delay(delay)
+                        .then(bindQuery(con1, STATUS))
+                        .then(ignore(bindQuery(con1, ROLLBACK)))
+                ]);
+            })
+            .spread(function extractStatus(result1, result2) {
+                return Q(result2[0][0].Status);
+            });
+    }
+
+    /**
+     * @return a connection to the database, with autocommit disabled
+     */
+    function connect() {
+        var conDetails = {
+            host: 'localhost',
+            user: 'root',
+            password: '',
+            database: 'test'
+        };
+
+        var con = mysql.createConnection(conDetails);
+        con.connect();
+        con.query('set autocommit = 0');
+        return con;
+    }
+
+    /**
+     * Enable the InnoDB lock monitor, which gives more detailed information on the locks held by each transaction.
+     * @param a valid MySQL connection
+     */
+    function enableLockMonitor(con) {
+        con.query('DROP TABLE IF EXISTS innodb_lock_monitor')
+        con.query('CREATE TABLE innodb_lock_monitor (a INT)')
+    }
+
+    /**
+     * Disable the InnoDB lock monitor.
+     * @param a valid MySQL connection
+     */
+    function disableLockMonitor(con) {
+        con.query('DROP TABLE IF EXISTS innodb_lock_monitor')
+    }
+}());
