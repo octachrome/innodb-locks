@@ -38,7 +38,7 @@
     var statements = [
         'DELETE FROM test',
         'DELETE FROM test WHERE a < 3',
-        'DELETE FROM test WHERE a = 2'
+        'DELETE FROM test WHERE a = 4'
     ];
 
     runTests(statements, 50/*ms*/);
@@ -54,6 +54,7 @@
         var con2 = connect();
 
         enableLockMonitor(con1);
+        createTestData(con1);
 
         var promise = Q();
 
@@ -78,9 +79,9 @@
      * @param status    the output from 'SHOW ENGINE INNODB STATUS'
      */
     function logStatus(statement, status) {
-        console.log("--------------------");
+        console.log("----------------------------------------");
         console.log(statement);
-        console.log("--------------------\n");
+        console.log("----------------------------------------\n");
         console.log(findHeldLocks(status));
     }
 
@@ -192,8 +193,8 @@
      * @param a valid MySQL connection
      */
     function enableLockMonitor(con) {
-        con.query('DROP TABLE IF EXISTS innodb_lock_monitor')
-        con.query('CREATE TABLE innodb_lock_monitor (a INT)')
+        con.query('DROP TABLE IF EXISTS innodb_lock_monitor');
+        con.query('CREATE TABLE innodb_lock_monitor (a INT)');
     }
 
     /**
@@ -201,14 +202,22 @@
      * @param a valid MySQL connection
      */
     function disableLockMonitor(con) {
-        con.query('DROP TABLE IF EXISTS innodb_lock_monitor')
+        con.query('DROP TABLE IF EXISTS innodb_lock_monitor');
+    }
+
+    function createTestData(con) {
+        con.query('DROP TABLE IF EXISTS test');
+        con.query('CREATE TABLE test (a INT NOT NULL, b INT, c INT, PRIMARY KEY(a), KEY(b)) ENGINE=InnoDB');
+        con.query('INSERT INTO test VALUES (0, 1, 2), (4, 5, 6), (8, 9, 10)');
+        con.query('COMMIT');
     }
 
     /**
-     * Extract the locks section from an InnoDB status string. If more than one transaction has active locks, only
-     * the locks from the first transaction will be returned.
+     * Extract the relevant locks section from an InnoDB status string. The program searches for a transaction which
+     * is a) not waiting for locks, and b) holds locks on a table named 'test'. In the unlikely event that more than
+     * one transaction holds locks on a table named 'test', only the locks from the first transaction will be returned.
      * @param the output of 'SHOW ENGINE INNODB STATUS'
-     * @return a description of the locks held by the first active (non-waiting) transaction
+     * @return a description of all the locks held by the first transaction which holds locks on a table named 'test'
      */
     function findHeldLocks(status) {
         var transactions = status.split(/---TRANSACTION /).slice(1);
@@ -220,10 +229,10 @@
             if (pos >= 0) tx = tx.slice(0, pos-10);
 
             // Skip the transaction which is waiting for the lock
-            if (tx.search(/------------------/) >= 0) continue;
+            if (tx.search(/TRX HAS BEEN WAITING /) >= 0) continue;
 
-            // Extract the text from the first lock description
-            var pos = tx.search(/(TABLE|RECORD) LOCK/);
+            // Extract the text from the first lock description which matches our test table
+            var pos = tx.search(/(TABLE|RECORD) LOCK.*\.`test`/);
             if (pos > 0) {
                 return tx.slice(pos);
             }
