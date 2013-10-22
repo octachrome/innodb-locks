@@ -27,6 +27,41 @@
 
     'use strict';
 
+    var connectionDetails = {
+        host: 'localhost',
+        user: 'root',
+        password: '',
+        database: 'test'
+    };
+
+    var statements = [
+        'DELETE FROM test WHERE pri = 4',
+        'UPDATE test SET non = 99 WHERE pri = 4',
+
+        'DELETE FROM test WHERE pri < 3',
+        'UPDATE test SET non = 99 WHERE pri < 3',
+
+        'DELETE FROM test WHERE sec = 5',
+        'UPDATE test SET non = 99 WHERE sec = 5',
+
+        'DELETE FROM test WHERE sec < 3',
+        'UPDATE test SET non = 99 WHERE sec < 3',
+
+        'DELETE FROM test WHERE non = 6',
+        'UPDATE test SET non = 99 WHERE non = 6',
+        'DELETE FROM test WHERE non < 3',
+        'UPDATE test SET non = 99 WHERE non < 3',
+        'DELETE FROM test',
+        'UPDATE test SET non = 99',
+
+        'INSERT INTO test VALUES (2,2,2)',
+
+        'UPDATE test SET pri = 40 WHERE pri = 4',
+
+        'UPDATE test SET sec = 50 WHERE sec = 5',
+    ];
+
+
     var Q = require('q');
     var mysql = require('mysql');
 
@@ -35,14 +70,22 @@
     var ROLLBACK = 'ROLLBACK';
     var STATUS = 'SHOW ENGINE INNODB STATUS';
 
-    var statements = [
-        'DELETE FROM test',
-        'DELETE FROM test WHERE a < 3',
-        'DELETE FROM test WHERE a = 4'
-    ];
-
     runTests(statements, 50/*ms*/);
 
+
+    /**
+     * Create a table named 'test' and insert some rows into it. The table contains three int columns:
+     *   pri (the primary key)
+     *   sec (a non-unique key)
+     *   non (not a key at all)
+     * @param con a valid MySQL connection
+     */
+    function createTestData(con) {
+        con.query('DROP TABLE IF EXISTS test');
+        con.query('CREATE TABLE test (pri INT NOT NULL, sec INT, non INT, PRIMARY KEY(pri), KEY(sec)) ENGINE=InnoDB');
+        con.query('INSERT INTO test VALUES (0, 1, 2), (4, 5, 6), (8, 9, 10)');
+        con.query('COMMIT');
+    }
 
     /**
      * Run each of the given statements on two concurrent MySQL connections and observe the locks which are aquired.
@@ -175,14 +218,7 @@
      * @return a connection to the database, with autocommit disabled
      */
     function connect() {
-        var conDetails = {
-            host: 'localhost',
-            user: 'root',
-            password: '',
-            database: 'test'
-        };
-
-        var con = mysql.createConnection(conDetails);
+        var con = mysql.createConnection(connectionDetails);
         con.connect();
         con.query('set autocommit = 0');
         return con;
@@ -203,13 +239,6 @@
      */
     function disableLockMonitor(con) {
         con.query('DROP TABLE IF EXISTS innodb_lock_monitor');
-    }
-
-    function createTestData(con) {
-        con.query('DROP TABLE IF EXISTS test');
-        con.query('CREATE TABLE test (a INT NOT NULL, b INT, c INT, PRIMARY KEY(a), KEY(b)) ENGINE=InnoDB');
-        con.query('INSERT INTO test VALUES (0, 1, 2), (4, 5, 6), (8, 9, 10)');
-        con.query('COMMIT');
     }
 
     /**
