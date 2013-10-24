@@ -130,9 +130,17 @@
         var promise = Q();
 
         statements.forEach(function buildPromiseForTest(statement) {
+            if (Array.isArray(statement)) {
+                // Run two statements against each other
+                var statement2 = statement[1];
+                statement = statement[0];
+            } else {
+                // Run the same statement against itself
+                statement2 = statement;
+            }
             promise = promise
                 .then(function runOneTest() {
-                    return runTest(con1, con2, statement, statement, delay);
+                    return runTest(con1, con2, statement, statement2, delay);
                 })
                 .then(logStatus.bind(null, statement));
         });
