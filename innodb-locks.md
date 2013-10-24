@@ -5,7 +5,7 @@ Row-level locks and table-level locks. If you don't explicitly lock tables, you 
 
 ## Table locks ##
 
-There are three varieties of table locks. Regular locks, intention locks, and auto-increment locks. Regular locks lock the table to prevent other people locking the table.
+There are three varieties of table locks. Regular locks, intention locks, and auto-increment locks. Regular locks lock the table to prevent other people locking the table. There is a fourth type of lock, called the table metadata lock. All active transactions must commit before a schema change can be made (true?)
 
 ## Regular table locks ##
 
@@ -30,25 +30,45 @@ S | X | No
 X | S | No
 X | X | No
 
-Shared and exclusive locks are commonly used in many database systems.
+These kinds of shared and exclusive locks are commonly used in many database systems.
 
 ## Intention locks ##
 
-Whenever a row-level lock is acquired, you also acquire an **intention lock** on the table. This prevents someone from locking a single row within a table which is already locked as a whole by someone else, and vice versa.
+Whenever a row-level lock is acquired, you also acquire an **intention lock** on the *table*. This prevents someone from locking a single row within a table which is already locked as a whole by someone else, and vice versa.
 
-  X     IX      S     IS
-X Conflict  Conflict  Conflict  Conflict
-IX  Conflict  Compatible  Conflict  Compatible
-S Conflict  Conflict  Compatible  Compatible
-IS  Conflict  Compatible  Compatible  Compatible
+From the manual:
 
-Intention shared (IS): Transaction T intends to set S locks on individual rows in table t.
-Intention exclusive (IX): Transaction T intends to set X locks on those rows.
+> Before a transaction can acquire an S lock on a *row* in table t, it must first
+> acquire an IS or stronger lock on *table* t.
+> Before a transaction can acquire an X lock on a *row*, it must first acquire an
+> IX lock on *table* t.
 
-Before a transaction can acquire an S lock on a row in table t, it must first acquire an IS or stronger lock on t.
-Before a transaction can acquire an X lock on a row, it must first acquire an IX lock on t.
+Several people can hold intention locks on the same table at the same time (they are locking independent rows), but intention locks are generally incompatible with regular table-level locks:
+
+Lock held | Lock wanted | Granted?
+----------|-------------|---------
+S | S | Yes
+S | X | No
+X | S | No
+X | X | No
+IS | IS | Yes
+IS | IX | Yes
+IX | IS | Yes
+IX | IX | Yes
+IS | S | Yes
+IS | X | No
+IX | S | No
+Ix | X | No
+S | IS | Yes
+S | IX | No
+X | IS | No
+X | IX | No
 
 Intention locks should not be confused with insert intention locks, which are a kind of row-level lock (see below).
+
+## Auto-increment locks ##
+
+*To do*
 
 ## Record locks ##
 
@@ -60,22 +80,19 @@ When we talk about record locks, the thing which is locked is an index record: a
 
 ## Types of record lock ##
 
-There are four common varieties of lock.
+There are four common varieties of lock. You can observe them using `SHOW ENGINE INNODB STATUS`, but note that locks only appear when they are contested. InnoDB locks records implicitly at first, but when a lock is contested the lock is added to a data structure, at which point it shows up in the lock monitor output.
 
-**Ordinary** locks, aka **next-key** locks, lock an index record and the gap between this index record and its predecessor. They look like this:
+**Ordinary** locks, aka **next-key** locks, lock an index record and the gap between this index record and its predecessor. When you run `SHOW ENGINE INNODB STATUS`, they look like this:
 
     RECORD LOCKS space id 0 page no 307 n bits 72 index `PRIMARY` of table `test`.`test` trx id 503 lock_mode X
-    Record lock, heap no 2 PHYSICAL RECORD: n_fields 4; compact format; info bits 0
 
 **Record** locks, aka **rec-not-gap** locks, lock an index record only. They look like this:
 
     RECORD LOCKS space id 0 page no 307 n bits 72 index `PRIMARY` of table `test`.`test` trx id 503 lock_mode X locks rec but not gap
-    Record lock, heap no 2 PHYSICAL RECORD: n_fields 4; compact format; info bits 0
 
 **Gap** locks lock the gap between two index records only, but not the records themselves. They look like this:
 
     RECORD LOCKS space id 0 page no 307 n bits 72 index `PRIMARY` of table `test`.`test` trx id 503 lock_mode X locks gap before rec
-    Record lock, heap no 2 PHYSICAL RECORD: n_fields 4; compact format; info bits 0
 
 However, if a gap lock is held on the gap before the supremum record (heap no 1), it will appear as an ordinary lock:
 
@@ -85,36 +102,215 @@ However, if a gap lock is held on the gap before the supremum record (heap no 1)
 **Insert intention** or **insert intent** locks also lock the gap only. They look like this:
 
     RECORD LOCKS space id 0 page no 307 n bits 72 index `PRIMARY` of table `test`.`test` trx id 503 lock_mode X locks gap before rec insert intention
-    Record lock, heap no 2 PHYSICAL RECORD: n_fields 4; compact format; info bits 0
 
 If an insert intention lock is held on the gap before the supremum record (heap no 1), it looks like this instead:
 
     RECORD LOCKS space id 0 page no 307 n bits 72 index `PRIMARY` of table `test`.`test` trx id 50F lock_mode X insert intention
     Record lock, heap no 1 PHYSICAL RECORD: n_fields 1; compact format; info bits 0
 
-Each variety of lock can occur in two modes: shared (S) and exclusive (X).
+Each of these lock varieties can can occur in shared (S) or exclusive (X) mode. Generally locks which affect the record (ordinary and record only) conflict with each other if the lock modes are incompatible, but locks which affect the gap do not, regardless of lock mode (see the table for exceptions to this rule).
 
-What sorts of operations create what sort of locks?
+Lock held | Lock wanted | Granted?
+----------|-------------|---------
+Ordinary | Ordinary | Check lock modes
+Ordinary | Record | Check lock modes
+Ordinary | Gap | Always
+Ordinary | Insert intent | Check lock modes
+Record | Ordinary | Check lock modes
+Record | Record | Check lock modes
+Record | Gap | Always
+Record | Insert intent | Always
+Gap | Ordinary | Always
+Gap | Record | Always
+Gap | Gap | Always
+Gap | Insert intent | Check lock modes
+Insert intent | Ordinary | Always
+Insert intent | Record | Always
+Insert intent | Gap | Always
+Insert intent | Insert intent | Always
 
-Statement | Isolation level | Lock
-----------|-----------------|------
-insert    | Repeatable read | 
-
-
-Lock compatibility.
+Note the asymmetry: an insert intent lock is blocked by an existing gap lock, but not vice versa.
 
 Can the supremum of a non-root page ever be locked? Are heap nos unique within a page or within an index?
 
+## When are locks acquired? ##
 
-Gap             Y                     Y             Y
-Gap (intent)    Y       Y             Y             Y
-Rec-not-gap     Y       Y
-Ordinary        Y
+Different sorts of SQL statement acquire different sorts of lock. This is also dependent on the isolation level of the transaction in which the statement is executed (**is this true?**)
+
+(all below assume repeatable read)
+
+### Delete with equality test on primary key
+
+    delete from kittens where id = 5;
+
+IX lock on table. X record (rec-not-gap) lock on primary key index record.
+
+### Unconstrained delete
+
+    delete from kittens;
+
+IX lock on table. X ordinary lock on all primary key index records. X gap lock on the supremum record. These locks together prevent any new row from being inserted in the table, and prevent any existing row from being updated. Deleting with a test on a non-key column effectively locks the whole table.
+
+### Delete with inequality test on primary key
+
+    delete from kittens where id > 4;
+
+IX lock on table. X ordinary lock on all primary key index records which are scanned while checking the inequality (this may include records which *do not match* the inequality). Example:
+
+    tiny.test contains (0,0) (2,2) (4,4)
+    //tx1
+    delete from test where a < 1;
+    //tx2
+    delete from test
+
+Tx1 locks the (0,0) record and the (2,2) record, which makes sense because the gap before 2 contains the value being tested against: 1. However, the same locks are acquired for this statement:
+
+    delete from test where a <= 0;
+
+It is not always clear which records will be scanned while executing a statement.
+
+### Delete with equality test on secondary key
+
+    delete from kittens where age = 1;
+
+IX lock on table. X ordinary lock on secondary index record. X rec-not-gap lock on corresponding primary key index record(s). X gap lock on the next secondary index record (the gap where more matching rows might be inserted by another tx, assuming it is non-unique).
+
+Example:
+
+    tiny.test contains (0,0) (2,2) (4,4)
+    //tx1
+    delete from test where b = 2;
+    //tx2
+    delete from test
+
+Remember from the lock compatibility table that gap locks only block insert intention locks, i.e., they prevent someone adding another record to the secondary key which would match the inequality. They do not block other gap locks, which means that other transactions can also block inserts into the same gap.
+
+From some **unqualified sources**:
+
+> ...the gap locks acquired by DELETE statements are of the purely "inhibitive" variety.
+> The DELETE gap lock blocks INSERT statements (which acquire "insert intention" locks), but do not block other DELETE X-locks.
+
+> 'gap' locks in InnoDB are purely 'inhibitive': they block inserts to the
+> locked gap. But they do not give the holder of the lock any right to
+> insert. Several transactions can own X-lock on the same gap. The reason
+
+### Delete with inequality test on secondary key
+
+    delete from kittens where age < 1;
+
+IX lock on table. X ordinary lock on all secondary index records which are scanned which checking the inequality (with the same unpredictability as mentioned above). X rec-not-gap lock on primary key index record(s) which are deleted. (no "gap lock on the next secondary index record" as above, but this may depend on the scanning semantics - in the example below, an ordinary lock was acquired instead).
+
+    tiny.test contains (0,0) (2,2) (4,4)
+    //tx1
+    delete from test where a < 1;
+    //tx2
+    delete from test
+
+Surprising example:
+    delete from test where b <= 0;
+
+This matches one row, but the locks are on the matching secondary index record (b = 0, a = 0):
+
+    RECORD LOCKS space id 0 page no 337 n bits 72 index `ib` of table `test`.`test` trx id B3C lock_mode X
+    Record lock, heap no 2 PHYSICAL RECORD: n_fields 2; compact format; info bits 32
+     0: len 4; hex 80000000; asc     ;;
+     1: len 4; hex 80000000; asc     ;;
+
+...the next, non-matching secondary index record, whose gap would *not* contain inserted rows which match the inequality (**true?**) (b = 2, a = 2):
+
+    Record lock, heap no 3 PHYSICAL RECORD: n_fields 2; compact format; info bits 0
+     0: len 4; hex 80000002; asc     ;;
+     1: len 4; hex 80000002; asc     ;;
+
+...the matching record in the clustered index (a = 0, b = 0, plus the transaction id and roll pointer):
+
+    RECORD LOCKS space id 0 page no 307 n bits 72 index `PRIMARY` of table `test`.`test` trx id B3C lock_mode X locks rec but not gap
+    Record lock, heap no 2 PHYSICAL RECORD: n_fields 4; compact format; info bits 32
+     0: len 4; hex 80000000; asc     ;;
+     1: len 6; hex 000000000b3c; asc      <;;
+     2: len 7; hex 2d000001550110; asc -   U  ;;
+     3: len 4; hex 80000000; asc     ;;
+
+...and, a non-matching index in the clustered index! (a = 2, b = 2)
+
+    Record lock, heap no 3 PHYSICAL RECORD: n_fields 4; compact format; info bits 0
+     0: len 4; hex 80000002; asc     ;;
+     1: len 6; hex 000000000b14; asc       ;;
+     2: len 7; hex 900000013b0110; asc     ;  ;;
+     3: len 4; hex 80000002; asc     ;;
+
+So, deleting records where b <= 0 locks a record with b = 2, preventing it from being updated or deleted by another transaction.
+
+### Delete with any test on non-key column
+
+    delete from test where c = 1;
+    delete from test where c < 1;
+
+IX lock on table. X ordinary lock on all primary index records which are scanned which checking the equality, which must be all of them. X gap lock on the supremum record. These locks together prevent any new row from being inserted in the table, and prevent any existing row from being updated by another transaction.
+
+Deleting with a test on a non-key column effectively locks the whole table, even if *no rows are actually deleted* from the table.
+
+### Update all rows in table
+
+    update test set c = 3;
+
+IX lock on table. X ordinary lock on all primary index records. X gap lock on the supremum record. These locks together prevent any new row from being inserted in the table, and prevent any existing row from being updated by another transaction.
+
+### Update with equality test on primary key
+
+    update test set c = 8 where a = 4;
+
+IX lock on table. X rec-not-gap lock on matching primary index record.
+
+### Update with inequality test on primary key
+
+    update test set c = 8 where a < 2;
+
+IX lock on table. X ordinary lock on all primary index records scanned. In this case, this included the record for a = 2, even though this row was not updated (note that it makes sense to lock the gap, preventing a record being inserted with a = 1, which *would* match).
+
+### Update with equality test on seconday key
+
+    update test set c = 8 where b = 2;
+
+IX lock on table. X ordinary lock on matching secondary index records. X rec-not-gap lock on the primary key index records which were updated. X gap lock on the next secondary index record (prevents insertion of other records with the same key?).
+
+### Update with inequality test on seconday key
+
+    update test set c = 8 where b < 2;
+
+IX lock on table. X ordinary lock on secondary index records scanned while checking the inequality (in this case, b = 0 and b = 2). X rec-not-gap lock on the primary key index records which correspond with them, including the one that didn't actually match.
+
+### Update primary key with equality test on primary key
+
+    update test set a = 1 where a = 0;
+
+A new primary key record is created with the other fields copied across. IX lock on table. X rec-not-gap lock on both original and new primary key records.
+
+### Update primary key with inequality test on primary key
+
+    update test set a = 1 where a < 2;
+
+A new primary key record is created with the other fields copied across. IX lock on table. X ordinary locks on primary key records scanned while checking inequality (inclues a = 0 and a = 2). X gap lock on new primary key record (a = 1). X rec-not-gap lock on new primary key record.
 
 
+    update pri where sec = 1
+    update pri where sec < 1
+    update sec where pri = 1
+    update sec where pri < 1
+    update sec where sec = 1
+    update sec where sec < 1
+    insert into
+    insert into ... select where (pri|sec|non) (=|<=)
+    select where (pri|sec|non) (=|<=) for update
+    select where (pri|sec|non) (=|<=) lock in share mode
 
 
-
+TODO:
+  add examples with innodb status output for all above.
+  try all examples with different isolation levels (write a script?)
+  inequality where v < k and k is an existing key value
+  inequality where v < k and k is not an existing key value
+  other inequalities: <=, >, >=, like
 
 
 TABLE LOCK table `test`.`test` trx id 503 lock mode IX
@@ -358,12 +554,16 @@ I think:
 
   (I now know that the insert intention lock is not released, rather it does not block a regular gap lock)
 
+  However, I cannot engineer a situation where an intention lock is acquired on a gap, and then a gap lock is acquired on the same gap
+  without blocking. If you do an insert followed by a delete, the delete locks the newly inserted primary key record. Vice versa, the insert
+  blocks on the gap lock. There is symmetry in the results though not in the means.
 
 A   insert into test values(5,5);
 B   insert into test values(5,5);
 
 //  hopefully, B now holds an intention lock on the gap below 7
 //  nope, B immediately fails with a duplicate key error
+//  (cannot reproduce this with 5.5, unless A commits while B is blocked)
 
 A   delete from test where i = 6;
 
@@ -446,4 +646,5 @@ So:
 Found another Nestlé issue where many transactions are waiting for the AUTO-INC lock for batch_updates.
 The tx which holds it is waiting for the insert intention gap lock for the same insert operation, which is probably held by someone deleting from the table (not clear from logs).
 Solved in 5.1.22 by holding the auto-inc lock for less time.
+
 
