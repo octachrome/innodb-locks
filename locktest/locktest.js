@@ -51,6 +51,8 @@
 
         'DELETE FROM test WHERE sec < 3',
         'UPDATE test SET non = 99 WHERE sec < 3',
+        // This one non-deterministically blocks on the primary key or on the secondary key
+        'DELETE FROM test WHERE sec > 2',
 
         'DELETE FROM test WHERE non = 6',
         'UPDATE test SET non = 99 WHERE non = 6',
@@ -73,20 +75,14 @@
         // Odd that this only locks the primary key
         ['INSERT INTO test VALUES (2,2,2)', 'DELETE FROM test WHERE pri = 2 OR sec = 2'],
 
+        // This non-deterministically blocks or doesn't block. Perhaps depending on whether the delete locks the
+        // primary or secondary key. Running the delete against itself just before this makes it lock more often.
+        ['INSERT INTO test VALUES (2,0,0)', 'DELETE FROM test WHERE sec > 2'],
+
         // Need some tricks here to reveal the locks on the newly created index records
         ['UPDATE test SET pri = 15 WHERE pri = 4', 'DELETE FROM test WHERE pri = 15'],
 
         ['UPDATE test SET sec = 15 WHERE sec = 5', 'DELETE FROM test WHERE sec = 15'],
-    ];
-
-    /***************** TO DO ******************/
-    statements = [
-        // ['DELETE FROM test WHERE sec > 2', 'DELETE FROM test WHERE sec > 2'],
-        // This test only blocks if the previous test runs, even with a 5s delay between them.
-        // Maybe to do with the index records not being purged after rollback.
-        // I will try creating new connections each time, rather than recycling them
-        // (though not sure about the implications of that for connection pooling)
-        ['INSERT INTO test VALUES (2,0,0)', 'DELETE FROM test WHERE sec > 2'],
     ];
 
 
