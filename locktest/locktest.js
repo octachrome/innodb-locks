@@ -34,9 +34,14 @@
         database: 'test'
     };
 
+    /**
+     * A list of statements to test. By default, the same statement is run in two concurrent connections. If you
+     * want to run two different statements concurrently, use an array containing the two statements.
+     */
     var statements = [
         'DELETE FROM test WHERE pri = 4',
         'UPDATE test SET non = 99 WHERE pri = 4',
+        'DELETE FROM test WHERE pri = 4 or pri = 8',
 
         'DELETE FROM test WHERE pri < 3',
         'UPDATE test SET non = 99 WHERE pri < 3',
@@ -56,9 +61,32 @@
 
         'INSERT INTO test VALUES (2,2,2)',
 
-        'UPDATE test SET pri = 40 WHERE pri = 4',
+        // Interesting that this gives a different result
+        ['INSERT INTO test VALUES (2,2,2)', 'DELETE FROM test WHERE sec = 2'],
 
-        'UPDATE test SET sec = 50 WHERE sec = 5',
+        // Here the gap lock from the delete blocks the insert intention lock
+        ['DELETE FROM test WHERE sec < 2', 'INSERT INTO test VALUES (2,0,0)'],
+
+        // The insert intention locks do not block each other
+        ['INSERT INTO test VALUES (2,0,0)', 'INSERT INTO test VALUES (3,0,0)'],
+
+        // Odd that this only locks the primary key
+        ['INSERT INTO test VALUES (2,2,2)', 'DELETE FROM test WHERE pri = 2 OR sec = 2'],
+
+        // Need some tricks here to reveal the locks on the newly created index records
+        ['UPDATE test SET pri = 15 WHERE pri = 4', 'DELETE FROM test WHERE pri = 15'],
+
+        ['UPDATE test SET sec = 15 WHERE sec = 5', 'DELETE FROM test WHERE sec = 15'],
+    ];
+
+    /***************** TO DO ******************/
+    statements = [
+        // ['DELETE FROM test WHERE sec > 2', 'DELETE FROM test WHERE sec > 2'],
+        // This test only blocks if the previous test runs, even with a 5s delay between them.
+        // Maybe to do with the index records not being purged after rollback.
+        // I will try creating new connections each time, rather than recycling them
+        // (though not sure about the implications of that for connection pooling)
+        ['INSERT INTO test VALUES (2,0,0)', 'DELETE FROM test WHERE sec > 2'],
     ];
 
 
@@ -122,9 +150,9 @@
      * @param status    the output from 'SHOW ENGINE INNODB STATUS'
      */
     function logStatus(statement, status) {
-        console.log("----------------------------------------");
+        console.log('----------------------------------------');
         console.log(statement);
-        console.log("----------------------------------------\n");
+        console.log('----------------------------------------\n');
         console.log(findHeldLocks(status));
     }
 
@@ -249,6 +277,8 @@
      * @return a description of all the locks held by the first transaction which holds locks on a table named 'test'
      */
     function findHeldLocks(status) {
+        var waitingFor, holding;
+
         var transactions = status.split(/---TRANSACTION /).slice(1);
         for (var i = 0; i < transactions.length; i++) {
             var tx = transactions[i];
@@ -258,13 +288,25 @@
             if (pos >= 0) tx = tx.slice(0, pos-10);
 
             // Skip the transaction which is waiting for the lock
-            if (tx.search(/TRX HAS BEEN WAITING /) >= 0) continue;
+            pos = tx.search(/SEC FOR THIS LOCK TO BE GRANTED:/);
+            if (pos >= 0) {
+                tx = tx.slice(pos + 40);
+                pos = tx.search(/------------------/);
+                waitingFor = tx.slice(0, pos - 1);
 
-            // Extract the text from the first lock description which matches our test table
-            var pos = tx.search(/(TABLE|RECORD) LOCK.*\.`test`/);
-            if (pos > 0) {
-                return tx.slice(pos);
+            } else {
+                // Extract the text from the first lock description which matches our test table
+                var pos = tx.search(/(TABLE|RECORD) LOCK.*\.`test`/);
+                if (pos >= 0) {
+                    holding = tx.slice(pos);
+                }
+            }
+
+            if (waitingFor && holding) {
+                break;
             }
         }
+
+        return holding + '\nOTHER STATEMENT BLOCKED ON:\n\n' + (waitingFor || '* NONE *\n');
     }
 }());
