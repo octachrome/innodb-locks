@@ -1,7 +1,10 @@
+# InnoDB locking #
+
+This is my attempt to understand the locking mechanisms used by MySQL's InnoDB engine. I was trying to understand why lock wait timeout errors were occurring in an app I was working on. It turns out to be a lot more difficult to understand than you might expect, and it's not very well documented.
 
 ## Types of lock ##
 
-Row-level locks and table-level locks. If you don't explicitly lock tables, you don't need to worry about table locks.
+There are row-level locks and table-level locks. If you don't explicitly lock tables, you don't need to worry about table locks. Table locks are pretty simple, so most of this document is about row locks.
 
 ## Table locks ##
 
