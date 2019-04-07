@@ -61,7 +61,7 @@ IX | IX | Yes
 IS | S | Yes
 IS | X | No
 IX | S | No
-Ix | X | No
+IX | X | No
 S | IS | Yes
 S | IX | No
 X | IS | No
